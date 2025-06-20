@@ -753,4 +753,4 @@ def analyze_soil_results(soil_data_results):
 
 # Main app
 def main():
-    st.title("🌾
+    st.title("🌾 Real Farm Soil Analysis")
