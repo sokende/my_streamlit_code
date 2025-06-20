@@ -12,6 +12,9 @@ from streamlit_folium import st_folium
 from shapely.geometry import Point
 from shapely.ops import unary_union
 import time
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # Configure page
 st.set_page_config(
@@ -74,8 +77,10 @@ def get_soil_data_soilgrids(lat, lon):
                 'organic_carbon': None,
                 'clay_content': None,
                 'sand_content': None,
+                'silt_content': None,
                 'nitrogen': None,
-                'cec': None  # Cation Exchange Capacity
+                'cec': None,  # Cation Exchange Capacity
+                'bulk_density': None
             }
             
             # Extract pH (0-5cm)
@@ -98,6 +103,11 @@ def get_soil_data_soilgrids(lat, lon):
                 sand_data = properties['sand']['depths'][0]['values']['mean']
                 soil_info['sand_content'] = sand_data / 10  # Convert to %
             
+            # Extract silt content (0-5cm)
+            if 'silt' in properties:
+                silt_data = properties['silt']['depths'][0]['values']['mean']
+                soil_info['silt_content'] = silt_data / 10  # Convert to %
+            
             # Extract nitrogen (0-5cm)
             if 'nitrogen' in properties:
                 n_data = properties['nitrogen']['depths'][0]['values']['mean']
@@ -107,6 +117,11 @@ def get_soil_data_soilgrids(lat, lon):
             if 'cec' in properties:
                 cec_data = properties['cec']['depths'][0]['values']['mean']
                 soil_info['cec'] = cec_data / 10  # Convert to cmol/kg
+            
+            # Extract bulk density (0-5cm)
+            if 'bdod' in properties:
+                bd_data = properties['bdod']['depths'][0]['values']['mean']
+                soil_info['bulk_density'] = bd_data / 100  # Convert to g/cm³
             
             return soil_info, None
             
@@ -214,8 +229,8 @@ def generate_sample_points(farm_geom, num_points=12):
     
     return points
 
-def create_real_soil_quality_map(gdf):
-    """Create map with real soil quality data from SoilGrids"""
+def create_layered_map(gdf, soil_results, active_layers):
+    """Create map with toggleable analysis layers"""
     # Get the center of the shapefile
     bounds = gdf.total_bounds
     center_lat = (bounds[1] + bounds[3]) / 2
@@ -237,7 +252,7 @@ def create_real_soil_quality_map(gdf):
         control=True
     ).add_to(m)
     
-    # Add farm boundary
+    # Add farm boundary (always visible)
     folium.GeoJson(
         gdf.to_json(),
         style_function=lambda feature: {
@@ -250,6 +265,314 @@ def create_real_soil_quality_map(gdf):
         tooltip="Farm Area"
     ).add_to(m)
     
+    # Layer 1: Overall Soil Quality
+    if active_layers.get('overall_quality', False) and soil_results:
+        quality_group = folium.FeatureGroup(name="Overall Soil Quality")
+        
+        for result in soil_results:
+            popup_content = f"""
+            <b>Soil Quality Point {result['point']}</b><br>
+            <b>Quality:</b> {result['quality']} ({result['percentage']:.1f}%)<br>
+            <b>pH:</b> {result['ph']:.1f if result['ph'] else 'N/A'}<br>
+            <b>Organic Carbon:</b> {result['organic_carbon']:.1f if result['organic_carbon'] else 'N/A'} g/kg<br>
+            <b>Clay Content:</b> {result['clay_content']:.1f if result['clay_content'] else 'N/A'}%
+            """
+            
+            folium.CircleMarker(
+                location=[result['lat'], result['lon']],
+                radius=15,
+                popup=folium.Popup(popup_content, parse_html=True),
+                color='black',
+                weight=2,
+                fillColor=get_quality_color(result['quality']),
+                fillOpacity=0.8,
+                tooltip=f"Overall Quality: {result['quality']}"
+            ).add_to(quality_group)
+        
+        quality_group.add_to(m)
+    
+    # Layer 2: pH Analysis
+    if active_layers.get('ph_analysis', False) and soil_results:
+        ph_group = folium.FeatureGroup(name="pH Analysis")
+        
+        for result in soil_results:
+            if result['ph'] is not None:
+                ph_color = get_ph_color(result['ph'])
+                ph_status = get_ph_status(result['ph'])
+                
+                popup_content = f"""
+                <b>pH Analysis Point {result['point']}</b><br>
+                <b>pH Value:</b> {result['ph']:.1f}<br>
+                <b>Status:</b> {ph_status}<br>
+                <b>Optimal Range:</b> 6.0 - 7.0
+                """
+                
+                folium.CircleMarker(
+                    location=[result['lat'], result['lon']],
+                    radius=12,
+                    popup=folium.Popup(popup_content, parse_html=True),
+                    color='white',
+                    weight=2,
+                    fillColor=ph_color,
+                    fillOpacity=0.7,
+                    tooltip=f"pH: {result['ph']:.1f} ({ph_status})"
+                ).add_to(ph_group)
+        
+        ph_group.add_to(m)
+    
+    # Layer 3: Nutrient Analysis
+    if active_layers.get('nutrient_analysis', False) and soil_results:
+        nutrient_group = folium.FeatureGroup(name="Nutrient Analysis")
+        
+        for result in soil_results:
+            if result['organic_carbon'] is not None or result['nitrogen'] is not None:
+                nutrient_score = calculate_nutrient_score(result)
+                nutrient_color = get_nutrient_color(nutrient_score)
+                
+                popup_content = f"""
+                <b>Nutrient Analysis Point {result['point']}</b><br>
+                <b>Organic Carbon:</b> {result['organic_carbon']:.1f if result['organic_carbon'] else 'N/A'} g/kg<br>
+                <b>Nitrogen:</b> {result['nitrogen']:.2f if result['nitrogen'] else 'N/A'} g/kg<br>
+                <b>CEC:</b> {result['cec']:.1f if result['cec'] else 'N/A'} cmol/kg<br>
+                <b>Nutrient Score:</b> {nutrient_score:.1f}/100
+                """
+                
+                folium.CircleMarker(
+                    location=[result['lat'], result['lon']],
+                    radius=12,
+                    popup=folium.Popup(popup_content, parse_html=True),
+                    color='white',
+                    weight=2,
+                    fillColor=nutrient_color,
+                    fillOpacity=0.7,
+                    tooltip=f"Nutrient Score: {nutrient_score:.1f}"
+                ).add_to(nutrient_group)
+        
+        nutrient_group.add_to(m)
+    
+    # Layer 4: Soil Texture Analysis
+    if active_layers.get('texture_analysis', False) and soil_results:
+        texture_group = folium.FeatureGroup(name="Soil Texture")
+        
+        for result in soil_results:
+            if all(x is not None for x in [result['clay_content'], result['sand_content'], result.get('silt_content')]):
+                texture_type = classify_soil_texture(
+                    result['clay_content'], 
+                    result['sand_content'], 
+                    result.get('silt_content', 0)
+                )
+                texture_color = get_texture_color(texture_type)
+                
+                popup_content = f"""
+                <b>Soil Texture Point {result['point']}</b><br>
+                <b>Texture Type:</b> {texture_type}<br>
+                <b>Clay:</b> {result['clay_content']:.1f}%<br>
+                <b>Sand:</b> {result['sand_content']:.1f}%<br>
+                <b>Silt:</b> {result.get('silt_content', 0):.1f}%
+                """
+                
+                folium.CircleMarker(
+                    location=[result['lat'], result['lon']],
+                    radius=12,
+                    popup=folium.Popup(popup_content, parse_html=True),
+                    color='white',
+                    weight=2,
+                    fillColor=texture_color,
+                    fillOpacity=0.7,
+                    tooltip=f"Texture: {texture_type}"
+                ).add_to(texture_group)
+        
+        texture_group.add_to(m)
+    
+    # Layer 5: Management Zones
+    if active_layers.get('management_zones', False) and soil_results:
+        zones_group = folium.FeatureGroup(name="Management Zones")
+        
+        for result in soil_results:
+            zone = classify_management_zone(result)
+            zone_color = get_zone_color(zone)
+            
+            popup_content = f"""
+            <b>Management Zone Point {result['point']}</b><br>
+            <b>Zone:</b> {zone}<br>
+            <b>Recommendation:</b> {get_zone_recommendation(zone)}
+            """
+            
+            folium.CircleMarker(
+                location=[result['lat'], result['lon']],
+                radius=15,
+                popup=folium.Popup(popup_content, parse_html=True),
+                color='black',
+                weight=3,
+                fillColor=zone_color,
+                fillOpacity=0.6,
+                tooltip=f"Zone: {zone}"
+            ).add_to(zones_group)
+        
+        zones_group.add_to(m)
+    
+    # Add layer control
+    folium.LayerControl().add_to(m)
+    
+    # Fit map to farm boundary
+    m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
+    
+    return m
+
+# Helper functions for layer analysis
+def get_quality_color(quality):
+    color_map = {
+        "Excellent": "#2E8B57",
+        "Good": "#9ACD32",
+        "Fair": "#DAA520",
+        "Poor": "#CD853F",
+        "Very Poor": "#A0522D"
+    }
+    return color_map.get(quality, "#808080")
+
+def get_ph_color(ph):
+    if ph < 5.5:
+        return "#FF4500"  # Red - Very acidic
+    elif ph < 6.0:
+        return "#FF8C00"  # Orange - Acidic
+    elif ph <= 7.0:
+        return "#32CD32"  # Green - Optimal
+    elif ph <= 7.5:
+        return "#FFD700"  # Yellow - Slightly alkaline
+    else:
+        return "#8A2BE2"  # Purple - Very alkaline
+
+def get_ph_status(ph):
+    if ph < 5.5:
+        return "Very Acidic"
+    elif ph < 6.0:
+        return "Acidic"
+    elif ph <= 7.0:
+        return "Optimal"
+    elif ph <= 7.5:
+        return "Slightly Alkaline"
+    else:
+        return "Very Alkaline"
+
+def calculate_nutrient_score(result):
+    score = 0
+    count = 0
+    
+    if result['organic_carbon'] is not None:
+        oc = result['organic_carbon']
+        if oc >= 20:
+            score += 100
+        elif oc >= 15:
+            score += 80
+        elif oc >= 10:
+            score += 60
+        elif oc >= 5:
+            score += 40
+        else:
+            score += 20
+        count += 1
+    
+    if result['nitrogen'] is not None:
+        n = result['nitrogen']
+        if n >= 2.0:
+            score += 100
+        elif n >= 1.5:
+            score += 80
+        elif n >= 1.0:
+            score += 60
+        elif n >= 0.5:
+            score += 40
+        else:
+            score += 20
+        count += 1
+    
+    return score / count if count > 0 else 0
+
+def get_nutrient_color(score):
+    if score >= 80:
+        return "#006400"  # Dark Green
+    elif score >= 60:
+        return "#32CD32"  # Green
+    elif score >= 40:
+        return "#FFD700"  # Gold
+    elif score >= 20:
+        return "#FF8C00"  # Orange
+    else:
+        return "#FF4500"  # Red
+
+def classify_soil_texture(clay, sand, silt):
+    if clay >= 40:
+        return "Clay"
+    elif sand >= 85:
+        return "Sand"
+    elif silt >= 80:
+        return "Silt"
+    elif clay >= 25 and sand >= 45:
+        return "Sandy Clay"
+    elif clay >= 25 and silt >= 40:
+        return "Silty Clay"
+    elif clay >= 20:
+        return "Clay Loam"
+    elif sand >= 70:
+        return "Sandy Loam"
+    elif silt >= 50:
+        return "Silt Loam"
+    else:
+        return "Loam"
+
+def get_texture_color(texture):
+    color_map = {
+        "Clay": "#8B4513",
+        "Sand": "#F4A460",
+        "Silt": "#DDA0DD",
+        "Sandy Clay": "#CD853F",
+        "Silty Clay": "#9370DB",
+        "Clay Loam": "#A0522D",
+        "Sandy Loam": "#DAA520",
+        "Silt Loam": "#D8BFD8",
+        "Loam": "#228B22"
+    }
+    return color_map.get(texture, "#808080")
+
+def classify_management_zone(result):
+    ph = result.get('ph', 0)
+    oc = result.get('organic_carbon', 0)
+    quality_pct = result.get('percentage', 0)
+    
+    if quality_pct >= 75 and ph >= 6.0 and ph <= 7.0:
+        return "Premium Zone"
+    elif quality_pct >= 60:
+        return "Good Production Zone"
+    elif quality_pct >= 40:
+        return "Moderate Zone"
+    else:
+        return "Improvement Zone"
+
+def get_zone_color(zone):
+    color_map = {
+        "Premium Zone": "#006400",
+        "Good Production Zone": "#32CD32",
+        "Moderate Zone": "#FFD700",
+        "Improvement Zone": "#FF4500"
+    }
+    return color_map.get(zone, "#808080")
+
+def get_zone_recommendation(zone):
+    recommendations = {
+        "Premium Zone": "Maintain current practices",
+        "Good Production Zone": "Minor adjustments needed",
+        "Moderate Zone": "Focus on organic matter",
+        "Improvement Zone": "Priority for soil amendments"
+    }
+    return recommendations.get(zone, "No specific recommendation")
+
+def create_real_soil_quality_map(gdf):
+    """Create map with real soil quality data from SoilGrids"""
+    # Get the center of the shapefile
+    bounds = gdf.total_bounds
+    center_lat = (bounds[1] + bounds[3]) / 2
+    center_lon = (bounds[0] + bounds[2]) / 2
+    
     # Get farm geometry
     farm_geom = unary_union(gdf.geometry)
     
@@ -259,7 +582,7 @@ def create_real_soil_quality_map(gdf):
     
     if not sample_points:
         st.error("Could not generate sample points within farm boundary")
-        return m, []
+        return None, []
     
     # Get soil data for each point
     soil_data_results = []
@@ -273,30 +596,6 @@ def create_real_soil_quality_map(gdf):
         if soil_data and not error:
             quality, color, percentage, details = classify_soil_quality(soil_data)
             
-            # Create popup content
-            popup_content = f"""
-            <b>Soil Analysis Point {i+1}</b><br>
-            <b>Quality:</b> {quality} ({percentage:.1f}%)<br>
-            <b>pH:</b> {soil_data['ph']:.1f if soil_data['ph'] else 'N/A'}<br>
-            <b>Organic Carbon:</b> {soil_data['organic_carbon']:.1f if soil_data['organic_carbon'] else 'N/A'} g/kg<br>
-            <b>Clay Content:</b> {soil_data['clay_content']:.1f if soil_data['clay_content'] else 'N/A'}%<br>
-            <b>Sand Content:</b> {soil_data['sand_content']:.1f if soil_data['sand_content'] else 'N/A'}%<br>
-            <b>Nitrogen:</b> {soil_data['nitrogen']:.2f if soil_data['nitrogen'] else 'N/A'} g/kg<br>
-            <b>CEC:</b> {soil_data['cec']:.1f if soil_data['cec'] else 'N/A'} cmol/kg
-            """
-            
-            # Add marker to map
-            folium.CircleMarker(
-                location=[lat, lon],
-                radius=15,
-                popup=folium.Popup(popup_content, parse_html=True),
-                color='black',
-                weight=2,
-                fillColor=color,
-                fillOpacity=0.8,
-                tooltip=f"Soil Quality: {quality}"
-            ).add_to(m)
-            
             # Store results for analysis
             result = {
                 'point': i+1,
@@ -308,8 +607,10 @@ def create_real_soil_quality_map(gdf):
                 'organic_carbon': soil_data['organic_carbon'],
                 'clay_content': soil_data['clay_content'],
                 'sand_content': soil_data['sand_content'],
+                'silt_content': soil_data.get('silt_content'),
                 'nitrogen': soil_data['nitrogen'],
                 'cec': soil_data['cec'],
+                'bulk_density': soil_data.get('bulk_density'),
                 'details': details
             }
             soil_data_results.append(result)
@@ -319,30 +620,103 @@ def create_real_soil_quality_map(gdf):
         progress_bar.progress((i + 1) / len(sample_points))
         time.sleep(0.5)  # Rate limiting
     
-    # Create legend
-    legend_html = '''
-    <div style="position: fixed; 
-                bottom: 50px; left: 50px; width: 220px; height: 160px; 
-                background-color: white; border:2px solid grey; z-index:9999; 
-                font-size:14px; padding: 10px">
-    <p><b>Soil Quality Legend</b></p>
-    <p><i class="fa fa-circle" style="color:#2E8B57"></i> Excellent (80-100%)</p>
-    <p><i class="fa fa-circle" style="color:#9ACD32"></i> Good (65-79%)</p>
-    <p><i class="fa fa-circle" style="color:#DAA520"></i> Fair (50-64%)</p>
-    <p><i class="fa fa-circle" style="color:#CD853F"></i> Poor (35-49%)</p>
-    <p><i class="fa fa-circle" style="color:#A0522D"></i> Very Poor (<35%)</p>
-    <p><small>Data source: SoilGrids</small></p>
-    </div>
-    '''
-    m.get_root().html.add_child(folium.Element(legend_html))
+    return soil_data_results
+
+def create_analysis_charts(soil_results, active_layers):
+    """Create analysis charts based on active layers"""
+    if not soil_results:
+        return
     
-    # Add layer control
-    folium.LayerControl().add_to(m)
+    df = pd.DataFrame(soil_results)
     
-    # Fit map to farm boundary
-    m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
+    # Chart container
+    chart_cols = st.columns(2)
     
-    return m, soil_data_results
+    # pH Distribution Chart
+    if active_layers.get('ph_analysis', False) and 'ph' in df.columns:
+        with chart_cols[0]:
+            st.subheader("📊 pH Distribution")
+            
+            ph_data = df['ph'].dropna()
+            if not ph_data.empty:
+                fig = px.histogram(
+                    x=ph_data,
+                    nbins=10,
+                    title="Soil pH Distribution",
+                    labels={'x': 'pH Value', 'y': 'Frequency'},
+                    color_discrete_sequence=['#32CD32']
+                )
+                fig.add_vline(x=6.0, line_dash="dash", line_color="red", annotation_text="Optimal Min")
+                fig.add_vline(x=7.0, line_dash="dash", line_color="red", annotation_text="Optimal Max")
+                st.plotly_chart(fig, use_container_width=True)
+    
+    # Nutrient Analysis Chart
+    if active_layers.get('nutrient_analysis', False):
+        with chart_cols[1]:
+            st.subheader("🧪 Nutrient Levels")
+            
+            nutrients = []
+            if 'organic_carbon' in df.columns:
+                nutrients.append('organic_carbon')
+            if 'nitrogen' in df.columns:
+                nutrients.append('nitrogen')
+            
+            if nutrients:
+                fig = go.Figure()
+                
+                for nutrient in nutrients:
+                    nutrient_data = df[nutrient].dropna()
+                    if not nutrient_data.empty:
+                        fig.add_trace(go.Box(
+                            y=nutrient_data,
+                            name=nutrient.replace('_', ' ').title(),
+                            boxpoints='all'
+                        ))
+                
+                fig.update_layout(
+                    title="Nutrient Distribution",
+                    yaxis_title="Concentration (g/kg)"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+    
+    # Soil Texture Triangle (if texture analysis is active)
+    if active_layers.get('texture_analysis', False):
+        st.subheader("🔺 Soil Texture Analysis")
+        
+        texture_data = df[['clay_content', 'sand_content', 'silt_content']].dropna()
+        if not texture_data.empty:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Texture composition chart
+                avg_composition = {
+                    'Clay': texture_data['clay_content'].mean(),
+                    'Sand': texture_data['sand_content'].mean(),
+                    'Silt': texture_data['silt_content'].mean() if 'silt_content' in texture_data.columns else 0
+                }
+                
+                fig = px.pie(
+                    values=list(avg_composition.values()),
+                    names=list(avg_composition.keys()),
+                    title="Average Soil Composition"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                # Texture classification summary
+                textures = []
+                for _, row in texture_data.iterrows():
+                    texture = classify_soil_texture(
+                        row['clay_content'], 
+                        row['sand_content'], 
+                        row.get('silt_content', 0)
+                    )
+                    textures.append(texture)
+                
+                texture_counts = pd.Series(textures).value_counts()
+                st.write("**Texture Classification Summary:**")
+                for texture, count in texture_counts.items():
+                    st.write(f"• {texture}: {count} points")
 
 def analyze_soil_results(soil_data_results):
     """Analyze and summarize soil data results"""
@@ -379,198 +753,4 @@ def analyze_soil_results(soil_data_results):
 
 # Main app
 def main():
-    st.title("🌾 Real Farm Soil Analysis")
-    st.markdown("Upload your farm shapefile to get real soil quality analysis using global soil data.")
-    
-    # File upload
-    st.header("📁 Upload Farm Shapefile")
-    uploaded_file = st.file_uploader(
-        "Choose a ZIP file containing your shapefile",
-        type=['zip'],
-        help="Upload a ZIP file containing .shp, .shx, .dbf, and .prj files"
-    )
-    
-    if uploaded_file is not None:
-        # Extract and load shapefile
-        with st.spinner("Processing shapefile..."):
-            shp_path, error = extract_shapefile(uploaded_file)
-            
-            if error:
-                st.error(f"❌ {error}")
-                return
-            
-            try:
-                # Load shapefile
-                gdf = gpd.read_file(shp_path)
-                # Convert datetime columns to strings for JSON compatibility
-                gdf = gdf.copy()
-                for col in gdf.select_dtypes(include=['datetime64[ns]']).columns:
-                    gdf[col] = gdf[col].astype(str)
-                
-                # Display basic info
-                st.success(f"✅ Shapefile loaded successfully!")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Number of Features", len(gdf))
-                    st.metric("Total Area (hectares)", f"{gdf.geometry.area.sum() / 10000:.2f}")
-                
-                with col2:
-                    if not gdf.empty:
-                        bounds = gdf.total_bounds
-                        st.write(f"**Coordinate System:** {gdf.crs}")
-                        st.write(f"**Bounds:** {bounds[0]:.4f}, {bounds[1]:.4f} to {bounds[2]:.4f}, {bounds[3]:.4f}")
-                
-                # Create and display map with real soil analysis
-                st.header("🗺️ Real-Time Soil Quality Analysis")
-                st.markdown("*This analysis uses real soil data from SoilGrids. Click on the colored circles to see detailed soil information.*")
-                
-                # Warning about API usage
-                st.warning("⚠️ This analysis makes API calls to SoilGrids for real soil data. Please be patient as it may take some time to complete.")
-                
-                if st.button("🚀 Start Soil Analysis", type="primary"):
-                    # Create the map with real soil data
-                    soil_map, soil_results = create_real_soil_quality_map(gdf)
-                    
-                    if soil_results:
-                        # Display map
-                        map_data = st_folium(
-                            soil_map,
-                            width=700,
-                            height=500,
-                            returned_objects=["last_object_clicked"]
-                        )
-                        
-                        # Analyze results
-                        analysis = analyze_soil_results(soil_results)
-                        
-                        if analysis:
-                            # Display analysis summary
-                            st.header("📈 Real Soil Analysis Summary")
-                            
-                            col1, col2, col3 = st.columns(3)
-                            
-                            with col1:
-                                if analysis['avg_ph']:
-                                    ph_status = "Good" if 6.0 <= analysis['avg_ph'] <= 7.0 else "Needs Attention"
-                                    st.metric(
-                                        "Average pH",
-                                        f"{analysis['avg_ph']:.1f}",
-                                        delta=ph_status,
-                                        help="Optimal range: 6.0-7.0"
-                                    )
-                            
-                            with col2:
-                                if analysis['avg_organic_carbon']:
-                                    oc_status = "Good" if analysis['avg_organic_carbon'] >= 15 else "Low"
-                                    st.metric(
-                                        "Organic Carbon",
-                                        f"{analysis['avg_organic_carbon']:.1f} g/kg",
-                                        delta=oc_status,
-                                        help="Higher values indicate better soil health"
-                                    )
-                            
-                            with col3:
-                                overall_quality = "Excellent" if analysis['overall_percentage'] >= 80 else \
-                                                "Good" if analysis['overall_percentage'] >= 65 else \
-                                                "Fair" if analysis['overall_percentage'] >= 50 else \
-                                                "Poor" if analysis['overall_percentage'] >= 35 else "Very Poor"
-                                st.metric(
-                                    "Overall Farm Quality",
-                                    overall_quality,
-                                    delta=f"{analysis['overall_percentage']:.1f}%",
-                                    help="Based on multiple soil parameters"
-                                )
-                            
-                            # Quality distribution
-                            st.subheader("🎯 Soil Quality Distribution")
-                            quality_df = pd.DataFrame({
-                                'Quality': analysis['quality_distribution'].index,
-                                'Count': analysis['quality_distribution'].values,
-                                'Percentage': (analysis['quality_distribution'].values / analysis['sample_count'] * 100).round(1)
-                            })
-                            st.dataframe(quality_df, use_container_width=True)
-                            
-                            # Detailed soil parameters
-                            st.subheader("🧪 Detailed Soil Parameters")
-                            param_col1, param_col2 = st.columns(2)
-                            
-                            with param_col1:
-                                if analysis['avg_clay']:
-                                    st.metric("Average Clay Content", f"{analysis['avg_clay']:.1f}%")
-                                if analysis['avg_nitrogen']:
-                                    st.metric("Average Nitrogen", f"{analysis['avg_nitrogen']:.2f} g/kg")
-                            
-                            with param_col2:
-                                if analysis['avg_sand']:
-                                    st.metric("Average Sand Content", f"{analysis['avg_sand']:.1f}%")
-                                if analysis['avg_cec']:
-                                    st.metric("Average CEC", f"{analysis['avg_cec']:.1f} cmol/kg")
-                            
-                            # Generate recommendations based on real data
-                            st.header("💡 Recommendations Based on Real Soil Data")
-                            
-                            recommendations = []
-                            
-                            if analysis['avg_ph'] and analysis['avg_ph'] < 6.0:
-                                recommendations.append("🔹 **pH Management**: Your soil is acidic (pH < 6.0). Consider lime application to raise pH.")
-                            elif analysis['avg_ph'] and analysis['avg_ph'] > 7.5:
-                                recommendations.append("🔹 **pH Management**: Your soil is alkaline (pH > 7.5). Consider sulfur application or organic matter to lower pH.")
-                            
-                            if analysis['avg_organic_carbon'] and analysis['avg_organic_carbon'] < 10:
-                                recommendations.append("🔹 **Organic Matter**: Low organic carbon levels. Increase organic matter through compost, cover crops, or manure.")
-                            
-                            if analysis['avg_clay'] and analysis['avg_clay'] > 50:
-                                recommendations.append("🔹 **Soil Structure**: High clay content may cause drainage issues. Consider organic matter addition and avoid working wet soil.")
-                            elif analysis['avg_sand'] and analysis['avg_sand'] > 70:
-                                recommendations.append("🔹 **Water Retention**: High sand content may cause poor water retention. Add organic matter to improve water-holding capacity.")
-                            
-                            if analysis['avg_nitrogen'] and analysis['avg_nitrogen'] < 1.0:
-                                recommendations.append("🔹 **Nitrogen Management**: Low nitrogen levels detected. Consider nitrogen fertilization or legume cover crops.")
-                            
-                            # Quality-based recommendations
-                            poor_quality_percentage = (analysis['quality_distribution'].get('Poor', 0) + 
-                                                     analysis['quality_distribution'].get('Very Poor', 0)) / analysis['sample_count'] * 100
-                            
-                            if poor_quality_percentage > 30:
-                                recommendations.append("🔹 **Priority Areas**: Focus improvement efforts on areas with poor soil quality (marked in brown/orange on map).")
-                            
-                            if recommendations:
-                                for rec in recommendations:
-                                    st.markdown(rec)
-                            else:
-                                st.success("🎉 Your soil quality appears to be in good condition overall!")
-                            
-                            # Data source attribution
-                            st.info("📊 **Data Source**: This analysis uses real soil data from SoilGrids250m v2.0, a global soil information system.")
-                    
-                    else:
-                        st.error("❌ Could not retrieve soil data. Please try again or check your internet connection.")
-                
-            except Exception as e:
-                st.error(f"❌ Error loading shapefile: {str(e)}")
-                st.info("Make sure your ZIP file contains all required shapefile components (.shp, .shx, .dbf, .prj)")
-    
-    else:
-        st.info("👆 Please upload a farm boundary shapefile to begin real soil analysis.")
-        
-        # Instructions
-        st.header("📋 How It Works")
-        st.markdown("""
-        1. **Upload**: Upload your farm boundary shapefile (ZIP format)
-        2. **Analysis**: The system generates sample points within your farm boundary
-        3. **Real Data**: Each point is analyzed using real soil data from SoilGrids
-        4. **Results**: View interactive map with actual soil quality measurements
-        5. **Recommendations**: Get specific advice based on your soil conditions
-        
-        **Data Sources:**
-        - **SoilGrids250m**: Global soil information system with 250m resolution
-        - **Parameters**: pH, organic carbon, clay/sand content, nitrogen, CEC
-        - **Accuracy**: Based on machine learning from global soil profile database
-        
-        **Note**: This tool provides real soil analysis but professional soil testing 
-        is still recommended for detailed nutrient management and precise farming decisions.
-        """)
-
-if __name__ == "__main__":
-    main()
+    st.title("🌾
